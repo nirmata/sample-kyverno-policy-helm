@@ -78,10 +78,13 @@ jobs:
       - name: Update Helm Chart files
         if: steps.check_updates.outputs.changed == 'true'
         run: |
-          # Copy new policies to the Helm templates directory
+          # First, ensure all required directories exist
+          mkdir -p helm-chart/templates
+          
+          # Then, copy new policies to the Helm templates directory
           cp policies/* helm-chart/templates/
           
-          # Create Helm chart files if they don't exist
+          # Now, create or update other Helm chart files
           if [ ! -f "helm-chart/Chart.yaml" ]; then
             cat << 'EOF' > helm-chart/Chart.yaml
           apiVersion: v2
