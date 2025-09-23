@@ -1,4 +1,4 @@
-name: Update Kyverno Policies Helm Chart
+name: Manual Update Kyverno Policies Helm Chart
 
 on:
   workflow_dispatch:
