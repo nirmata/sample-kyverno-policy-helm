@@ -1,0 +1,141 @@
+name: Update Kyverno Policies Helm Chart
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 3 * * 1' # Runs every Monday at 3 AM UTC
+
+permissions:
+  contents: write
+
+jobs:
+  update-chart:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Needed to check for changes
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+      
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Define Policies
+        id: policies
+        run: |
+          cat > policies.json << 'EOF'
+          {
+            "disallow-capabilities": "https://raw.githubusercontent.com/nirmata/kyverno-policies/main/pod-security/baseline/disallow-capabilities/disallow-capabilities.yaml",
+            "disallow_cri_sock_mount": "https://raw.githubusercontent.com/nirmata/kyverno-policies/main/charts/best-practices-k8s/pols/disallow_cri_sock_mount.yaml",
+            "disallow_default_namespace": "https://raw.githubusercontent.com/nirmata/kyverno-policies/main/best-practices-k8s/disallow-default-namespace/disallow-default-namespace.yaml",
+            "disallow-custom-snippets": "https://raw.githubusercontent.com/nirmata/kyverno-policies/main/workload-security/disallow-custom-snippets.yaml",
+            "disallow_empty_ingress_host": "https://raw.githubusercontent.com/nirmata/kyverno-policies/refs/heads/main/best-practices-k8s/disallow-empty-ingress-host/disallow_empty_ingress_host.yaml",
+            "disallow-host-namespaces": "https://raw.githubusercontent.com/nirmata/kyverno-policies/main/pod-security/baseline/disallow-host-namespaces/disallow-host-namespaces.yaml",
+            "disallow-host-path": "https://raw.githubusercontent.com/nirmata/kyverno-policies/main/pod-security/baseline/disallow-host-path/disallow-host-path.yaml",
+            "disallow-host-ports": "https://raw.githubusercontent.com/nirmata/kyverno-policies/main/pod-security/baseline/disallow-host-ports/disallow-host-ports.yaml",
+            "disallow-privileged-containers": "https://raw.githubusercontent.com/nirmata/kyverno-policies/main/pod-security/baseline/disallow-privileged-containers/disallow-privileged-containers.yaml",
+            "disallow-privilege-escalation": "https://raw.githubusercontent.com/nirmata/kyverno-policies/main/pod-security/restricted/disallow-privilege-escalation/disallow-privilege-escalation.yaml",
+            "disallow-proc-mount": "https://raw.githubusercontent.com/nirmata/kyverno-policies/main/pod-security/baseline/disallow-proc-mount/disallow-proc-mount.yaml",
+            "disallow-selinux": "https://raw.githubusercontent.com/nirmata/kyverno-policies/main/pod-security/baseline/disallow-selinux/disallow-selinux.yaml",
+            "require_drop_all": "https://raw.githubusercontent.com/nirmata/kyverno-policies/main/charts/best-practices-k8s/pols/require_drop_all.yaml",
+            "require_probes": "https://raw.githubusercontent.com/nirmata/kyverno-policies/main/best-practices-k8s/require_probes/require_probes.yaml",
+            "require_pod_requests_limits": "https://raw.githubusercontent.com/nirmata/kyverno-policies/main/best-practices-k8s/require_pod_requests_limits/require_pod_requests_limits.yaml",
+            "require-run-as-non-root-user": "https://raw.githubusercontent.com/nirmata/kyverno-policies/main/pod-security/restricted/require-run-as-non-root-user/require-run-as-non-root-user.yaml",
+            "restrict-service-external-ips": "https://raw.githubusercontent.com/nirmata/kyverno-policies/main/charts/best-practices-k8s/pols/restrict-service-external-ips.yaml",
+            "restrict_image_registries": "https://raw.githubusercontent.com/nirmata/kyverno-policies/main/charts/best-practices-workload-security/pols/restrict_image_registries.yaml",
+            "restrict_node_port": "https://raw.githubusercontent.com/nirmata/kyverno-policies/main/best-practices-k8s/restrict_node_port/restrict_node_port.yaml",
+            "restrict-seccomp-strict": "https://raw.githubusercontent.com/nirmata/kyverno-policies/main/pod-security/restricted/restrict-seccomp-strict/restrict-seccomp-strict.yaml",
+            "restrict-sysctls": "https://raw.githubusercontent.com/nirmata/kyverno-policies/main/pod-security/baseline/restrict-sysctls/restrict-sysctls.yaml",
+            "restrict-apparmor-profiles": "https://raw.githubusercontent.com/nirmata/kyverno-policies/main/charts/pod-security-baseline/pols/restrict-apparmor-profiles.yaml",
+            "restrict-volume-types": "https://raw.githubusercontent.com/nirmata/kyverno-policies/main/pod-security/restricted/restrict-volume-types/restrict-volume-types.yaml",
+            "restrict-controlplane-scheduling": "https://raw.githubusercontent.com/kyverno/policies/main/other/restrict-controlplane-scheduling/restrict-controlplane-scheduling.yaml"
+          }
+          EOF
+          
+          mkdir -p policies
+          while read name url; do
+            echo "Downloading $name from $url"
+            curl -sSL "$url" > "policies/$name.yaml"
+          done < <(jq -r 'to_entries[] | .key, .value' policies.json)
+
+      - name: Check for policy updates
+        id: check_updates
+        run: |
+          if git diff --exit-code HEAD policies/ > /dev/null; then
+            echo "No policy updates found."
+            echo "changed=false" >> $GITHUB_OUTPUT
+          else
+            echo "Policy updates found. Updating policies and creating a new chart."
+            echo "changed=true" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Update Helm Chart
+        if: steps.check_updates.outputs.changed == 'true'
+        run: |
+          mkdir -p helm-chart/templates
+          
+          cp -r policies/* helm-chart/templates/
+
+          # Create or update Chart.yaml
+          if [ -f "helm-chart/Chart.yaml" ]; then
+            OLD_VERSION=$(yq '.version' helm-chart/Chart.yaml)
+            NEW_VERSION=$(semver bump patch "$OLD_VERSION")
+            yq -i ".version = \"$NEW_VERSION\"" helm-chart/Chart.yaml
+          else
+            cat << 'EOF' > helm-chart/Chart.yaml
+          apiVersion: v2
+          name: kyverno-policies
+          version: 1.0.0
+          description: A Helm chart for a curated set of Kyverno policies.
+          type: application
+          EOF
+          fi
+
+          # Create or update values.yaml
+          cat << 'EOF' > helm-chart/values.yaml
+          # Option to configure the validationFailureAction to either Enforce or Audit mode
+          validationFailureAction: Audit
+
+          # restrict_image_registries policy configuration
+          imageRegistries:
+            global:
+              - "eu.foo.io/*"
+              - "bar.io/*"
+            containers: []
+            initContainers: []
+            ephemeralContainers: []
+
+          # Legacy allowedRegistries setting for backward compatibility
+          allowedRegistries: "eu.foo.io/* | bar.io/*"
+          EOF
+
+          # Create _helpers.tpl for dynamic configuration
+          cat << 'EOF' > helm-chart/templates/_helpers.tpl
+          {{- define "kyverno-policies.restrictImageRegistries" -}}
+          {{- $list := list -}}
+          {{- if .Values.imageRegistries.containers -}}
+          {{- range .Values.imageRegistries.containers -}}
+          {{- $list = append $list (printf "%s" .) -}}
+          {{- end -}}
+          {{- else -}}
+          {{- range .Values.imageRegistries.global -}}
+          {{- $list = append $list (printf "%s" .) -}}
+          {{- end -}}
+          {{- end -}}
+          {{- join " | " $list -}}
+          {{- end -}}
+          EOF
+
+      - name: Commit and Push Changes
+        if: steps.check_updates.outputs.changed == 'true'
+        run: |
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          git add helm-chart/
+          git commit -m "chore(ci): Automatically update Kyverno policies and bump chart version"
+          git push
