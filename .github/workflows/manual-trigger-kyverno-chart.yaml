@@ -1,0 +1,152 @@
+name: Manually Update Kyverno Policies Helm Chart
+
+on:
+  # Manual trigger to run the workflow on demand
+  workflow_dispatch:
+  # Scheduled trigger to run every Monday at 3 AM UTC
+  schedule:
+    - cron: '0 3 * * 1'
+
+permissions:
+  contents: write
+
+jobs:
+  update-chart:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go and Helm
+        uses: azure/setup-helm@v4
+      
+      - name: Install yq for YAML processing
+        run: |
+          sudo snap install yq
+
+      - name: Define and Download Policies
+        id: download_policies
+        run: |
+          mkdir -p policies helm-chart/templates
+          
+          # Policy list with their respective URLs
+          declare -A policies
+          policies[disallow-capabilities]="https://raw.githubusercontent.com/nirmata/kyverno-policies/main/pod-security/baseline/disallow-capabilities/disallow-capabilities.yaml"
+          policies[disallow_cri_sock_mount]="https://raw.githubusercontent.com/kyverno/policies/main/charts/best-practices-k8s/pols/disallow_cri_sock_mount.yaml"
+          policies[disallow_default_namespace]="https://raw.githubusercontent.com/nirmata/kyverno-policies/main/best-practices-k8s/disallow-default-namespace/disallow-default-namespace.yaml"
+          policies[disallow-custom-snippets]="https://raw.githubusercontent.com/nirmata/kyverno-policies/main/workload-security/disallow-custom-snippets.yaml"
+          policies[disallow_empty_ingress_host]="https://raw.githubusercontent.com/nirmata/kyverno-policies/refs/heads/main/best-practices-k8s/disallow-empty-ingress-host/disallow_empty_ingress_host.yaml"
+          policies[disallow-host-namespaces]="https://raw.githubusercontent.com/nirmata/kyverno-policies/main/pod-security/baseline/disallow-host-namespaces/disallow-host-namespaces.yaml"
+          policies[disallow-host-path]="https://raw.githubusercontent.com/nirmata/kyverno-policies/main/pod-security/baseline/disallow-host-path/disallow-host-path.yaml"
+          policies[disallow-host-ports]="https://raw.githubusercontent.com/nirmata/kyverno-policies/main/pod-security/baseline/disallow-host-ports/disallow-host-ports.yaml"
+          policies[disallow-privileged-containers]="https://raw.githubusercontent.com/nirmata/kyverno-policies/main/pod-security/baseline/disallow-privileged-containers/disallow-privileged-containers.yaml"
+          policies[disallow-privilege-escalation]="https://raw.githubusercontent.com/nirmata/kyverno-policies/main/pod-security/restricted/disallow-privilege-escalation/disallow-privilege-escalation.yaml"
+          policies[disallow-proc-mount]="https://raw.githubusercontent.com/nirmata/kyverno-policies/main/pod-security/baseline/disallow-proc-mount/disallow-proc-mount.yaml"
+          policies[disallow-selinux]="https://raw.githubusercontent.com/nirmata/kyverno-policies/main/pod-security/baseline/disallow-selinux/disallow-selinux.yaml"
+          policies[require_drop_all]="https://raw.githubusercontent.com/kyverno/policies/main/charts/best-practices-k8s/pols/require_drop_all.yaml"
+          policies[require_probes]="https://raw.githubusercontent.com/nirmata/kyverno-policies/main/best-practices-k8s/require_probes/require_probes.yaml"
+          policies[require_pod_requests_limits]="https://raw.githubusercontent.com/nirmata/kyverno-policies/main/best-practices-k8s/require_pod_requests_limits/require_pod_requests_limits.yaml"
+          policies[require-run-as-non-root-user]="https://raw.githubusercontent.com/nirmata/kyverno-policies/main/pod-security/restricted/require-run-as-non-root-user/require-run-as-non-root-user.yaml"
+          policies[restrict-service-external-ips]="https://raw.githubusercontent.com/kyverno/policies/main/charts/best-practices-k8s/pols/restrict-service-external-ips.yaml"
+          policies[restrict_image_registries]="https://raw.githubusercontent.com/kyverno/policies/main/charts/best-practices-workload-security/pols/restrict_image_registries.yaml"
+          policies[restrict_node_port]="https://raw.githubusercontent.com/nirmata/kyverno-policies/main/best-practices-k8s/restrict_node_port/restrict_node_port.yaml"
+          policies[restrict-seccomp-strict]="https://raw.githubusercontent.com/nirmata/kyverno-policies/main/pod-security/restricted/restrict-seccomp-strict/restrict-seccomp-strict.yaml"
+          policies[restrict-sysctls]="https://raw.githubusercontent.com/nirmata/kyverno-policies/main/pod-security/baseline/restrict-sysctls/restrict-sysctls.yaml"
+          policies[restrict-apparmor-profiles]="https://raw.githubusercontent.com/kyverno/policies/main/charts/pod-security-baseline/pols/restrict-apparmor-profiles.yaml"
+          policies[restrict-volume-types]="https://raw.githubusercontent.com/nirmata/kyverno-policies/main/pod-security/restricted/restrict-volume-types/restrict-volume-types.yaml"
+          policies[restrict-controlplane-scheduling]="https://raw.githubusercontent.com/kyverno/policies/main/other/restrict-controlplane-scheduling/restrict-controlplane-scheduling.yaml"
+          
+          # Download each policy
+          for name in "${!policies[@]}"; do
+            echo "Downloading $name from ${policies[$name]}"
+            curl -sSL "${policies[$name]}" > "policies/$name.yaml"
+          done
+
+      - name: Check for policy updates
+        id: check_updates
+        run: |
+          if git diff --exit-code HEAD policies/ > /dev/null; then
+            echo "No policy updates found."
+            echo "changed=false" >> $GITHUB_OUTPUT
+          else
+            echo "Policy updates found. Updating Helm chart."
+            echo "changed=true" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Update Helm Chart files
+        if: steps.check_updates.outputs.changed == 'true'
+        run: |
+          # Copy new policies to the Helm templates directory
+          cp policies/* helm-chart/templates/
+          
+          # Create Helm chart files if they don't exist
+          if [ ! -f "helm-chart/Chart.yaml" ]; then
+            cat << 'EOF' > helm-chart/Chart.yaml
+          apiVersion: v2
+          name: kyverno-policies
+          version: 1.0.0
+          description: A Helm chart for a curated set of Kyverno policies.
+          type: application
+          EOF
+          fi
+
+          if [ ! -f "helm-chart/values.yaml" ]; then
+            cat << 'EOF' > helm-chart/values.yaml
+          # Default validationFailureAction for all policies
+          validationFailureAction: Audit
+
+          # Default image registry configuration for the restrict_image_registries policy
+          imageRegistries:
+            global:
+              - "eu.foo.io/*"
+              - "bar.io/*"
+            containers: []
+            initContainers: []
+            ephemeralContainers: []
+
+          # Legacy setting for backward compatibility (Deprecated)
+          allowedRegistries: "eu.foo.io/* | bar.io/*"
+          EOF
+          fi
+
+          if [ ! -f "helm-chart/templates/_helpers.tpl" ]; then
+            cat << 'EOF' > helm-chart/templates/_helpers.tpl
+          {{- define "kyverno-policies.restrictImageRegistries" -}}
+          {{- $list := list -}}
+          {{- if .Values.imageRegistries.containers -}}
+          {{- range .Values.imageRegistries.containers -}}
+          {{- $list = append $list (printf "%s" .) -}}
+          {{- end -}}
+          {{- else -}}
+          {{- range .Values.imageRegistries.global -}}
+          {{- $list = append $list (printf "%s" .) -}}
+          {{- end -}}
+          {{- end -}}
+          {{- join " | " $list -}}
+          {{- end -}}
+          EOF
+          fi
+
+      - name: Bump Chart Version
+        if: steps.check_updates.outputs.changed == 'true'
+        run: |
+          # Use yq to safely read, modify, and write the YAML file
+          OLD_VERSION=$(yq '.version' helm-chart/Chart.yaml)
+          # Use a simple counter logic to bump the version
+          IFS='.' read -r major minor patch <<< "$OLD_VERSION"
+          new_patch=$((patch + 1))
+          NEW_VERSION="$major.$minor.$new_patch"
+          
+          yq -i ".version = \"$NEW_VERSION\"" helm-chart/Chart.yaml
+          echo "Bumping Helm chart version from $OLD_VERSION to $NEW_VERSION."
+
+      - name: Commit and Push Changes
+        if: steps.check_updates.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add policies/ helm-chart/
+          git commit -m "chore(ci): Automatically update Kyverno policies and bump chart version"
+          git push
