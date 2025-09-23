@@ -84,10 +84,9 @@ version: 1.0.0
 description: A Helm chart for a curated set of Kyverno policies.
 type: application
 EOF
-            cat << 'EOF' > helm-chart/values.yaml
+cat << 'EOF' > helm-chart/values.yaml
 # Default validationFailureAction for all policies
 validationFailureAction: Audit
-
 # Default image registry configuration for the restrict_image_registries policy
 imageRegistries:
   global:
