@@ -1,4 +1,4 @@
-name: Manual Update Kyverno Policies Helm Chart
+name: Update Kyverno Policies Helm Chart
 
 on:
   workflow_dispatch:
@@ -17,15 +17,13 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Set up Go and Helm
-        uses: azure/setup-helm@v4
-
-      - name: Install yq for YAML processing
+      - name: Update and Create Helm Chart
         run: |
+          # --- Step 1: Set up tools ---
+          sudo apt-get update && sudo apt-get install -y curl git
           sudo snap install yq
 
-      - name: Define and Download Policies
-        run: |
+          # --- Step 2: Define and Download Policies ---
           mkdir -p policies helm-chart/templates
           
           declare -A policies
@@ -59,29 +57,16 @@ jobs:
             curl -sSL "${policies[$name]}" > "policies/$name.yaml"
           done
 
-      - name: Check for policy updates
-        id: check_updates
-        run: |
-          if git diff --exit-code HEAD policies/ > /dev/null; then
-            echo "No policy updates found."
-            echo "changed=false" >> $GITHUB_OUTPUT
-          else
-            echo "Policy updates found. Updating Helm chart."
-            echo "changed=true" >> $GITHUB_OUTPUT
-          fi
-      
-      - name: Update and Create Helm Chart
-        run: |
-          mkdir -p helm-chart/templates
-          
-          # Copy new policies to the Helm templates directory unconditionally
+          # --- Step 3: Check for Policy Updates ---
+          git diff --exit-code HEAD policies/ > /dev/null
+          policies_changed=$? # Capture exit code: 0 for no change, 1 for changes
+
+          # --- Step 4: Update and Create Helm Chart ---
           cp policies/* helm-chart/templates/
-          
-          # Check if Chart.yaml exists to determine if this is a new chart or an update
+
           if [ -f "helm-chart/Chart.yaml" ]; then
-            if [ "${{ steps.check_updates.outputs.changed }}" == "true" ]; then
+            if [ "$policies_changed" -eq 1 ]; then
               OLD_VERSION=$(yq '.version' helm-chart/Chart.yaml)
-              # Simple patch version bump
               new_patch=$(( $(echo $OLD_VERSION | awk -F'.' '{print $3}') + 1 ))
               NEW_VERSION="$(echo $OLD_VERSION | awk -F'.' '{print $1"."$2"."}')"$new_patch
               yq -i ".version = \"$NEW_VERSION\"" helm-chart/Chart.yaml
@@ -98,7 +83,6 @@ version: 1.0.0
 description: A Helm chart for a curated set of Kyverno policies.
 type: application
 EOF
-
             cat << 'EOF' > helm-chart/values.yaml
 # Default validationFailureAction for all policies
 validationFailureAction: Audit
@@ -115,7 +99,6 @@ imageRegistries:
 # Legacy setting for backward compatibility (Deprecated)
 allowedRegistries: "eu.foo.io/* | bar.io/*"
 EOF
-
             cat << 'EOF' > helm-chart/templates/_helpers.tpl
 {{- define "kyverno-policies.restrictImageRegistries" -}}
 {{- $list := list -}}
@@ -133,11 +116,13 @@ EOF
 EOF
           fi
 
-      - name: Commit and Push Changes
-        if: steps.check_updates.outputs.changed == 'true' || ! -f "helm-chart/Chart.yaml"
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add policies/ helm-chart/
-          git commit -m "chore(ci): Automatically update Kyverno policies and bump chart version"
-          git push
+          # --- Step 5: Commit and Push Changes ---
+          if [ "$policies_changed" -eq 1 ] || [ ! -f "helm-chart/Chart.yaml" ]; then
+              git config user.name "github-actions[bot]"
+              git config user.email "github-actions[bot]@users.noreply.github.com"
+              git add policies/ helm-chart/
+              git commit -m "chore(ci): Automatically update Kyverno policies and bump chart version"
+              git push
+          else
+              echo "No changes to commit."
+          fi
