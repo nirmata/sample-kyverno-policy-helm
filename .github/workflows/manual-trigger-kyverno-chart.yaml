@@ -20,7 +20,8 @@ jobs:
       - name: Update and Create Helm Chart
         run: |
           # --- Step 1: Set up tools ---
-          sudo apt-get update && sudo apt-get install -y curl git
+          sudo apt-get update
+          sudo apt-get install -y curl git
           sudo snap install yq
 
           # --- Step 2: Define and Download Policies ---
