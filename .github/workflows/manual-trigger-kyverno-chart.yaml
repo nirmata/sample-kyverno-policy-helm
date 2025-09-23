@@ -1,9 +1,7 @@
-name: Manually Update Kyverno Policies Helm Chart
+name: Update Kyverno Policies Helm Chart
 
 on:
-  # Manual trigger to run the workflow on demand
   workflow_dispatch:
-  # Scheduled trigger to run every Monday at 3 AM UTC
   schedule:
     - cron: '0 3 * * 1'
 
@@ -21,17 +19,15 @@ jobs:
 
       - name: Set up Go and Helm
         uses: azure/setup-helm@v4
-      
+
       - name: Install yq for YAML processing
         run: |
           sudo snap install yq
 
       - name: Define and Download Policies
-        id: download_policies
         run: |
           mkdir -p policies helm-chart/templates
           
-          # Policy list with their respective URLs
           declare -A policies
           policies[disallow-capabilities]="https://raw.githubusercontent.com/nirmata/kyverno-policies/main/pod-security/baseline/disallow-capabilities/disallow-capabilities.yaml"
           policies[disallow_cri_sock_mount]="https://raw.githubusercontent.com/kyverno/policies/main/charts/best-practices-k8s/pols/disallow_cri_sock_mount.yaml"
@@ -58,7 +54,6 @@ jobs:
           policies[restrict-volume-types]="https://raw.githubusercontent.com/nirmata/kyverno-policies/main/pod-security/restricted/restrict-volume-types/restrict-volume-types.yaml"
           policies[restrict-controlplane-scheduling]="https://raw.githubusercontent.com/kyverno/policies/main/other/restrict-controlplane-scheduling/restrict-controlplane-scheduling.yaml"
           
-          # Download each policy
           for name in "${!policies[@]}"; do
             echo "Downloading $name from ${policies[$name]}"
             curl -sSL "${policies[$name]}" > "policies/$name.yaml"
@@ -75,78 +70,71 @@ jobs:
             echo "changed=true" >> $GITHUB_OUTPUT
           fi
       
-      - name: Update Helm Chart files
-        if: steps.check_updates.outputs.changed == 'true'
+      - name: Update and Create Helm Chart
         run: |
-          # First, ensure all required directories exist
           mkdir -p helm-chart/templates
           
-          # Then, copy new policies to the Helm templates directory
+          # Copy new policies to the Helm templates directory unconditionally
           cp policies/* helm-chart/templates/
           
-          # Now, create or update other Helm chart files
-          if [ ! -f "helm-chart/Chart.yaml" ]; then
+          # Check if Chart.yaml exists to determine if this is a new chart or an update
+          if [ -f "helm-chart/Chart.yaml" ]; then
+            if [ "${{ steps.check_updates.outputs.changed }}" == "true" ]; then
+              OLD_VERSION=$(yq '.version' helm-chart/Chart.yaml)
+              # Simple patch version bump
+              new_patch=$(( $(echo $OLD_VERSION | awk -F'.' '{print $3}') + 1 ))
+              NEW_VERSION="$(echo $OLD_VERSION | awk -F'.' '{print $1"."$2"."}')"$new_patch
+              yq -i ".version = \"$NEW_VERSION\"" helm-chart/Chart.yaml
+              echo "Bumping Helm chart version from $OLD_VERSION to $NEW_VERSION."
+            else
+              echo "No policy changes, not updating Helm chart version."
+            fi
+          else
+            echo "Initial chart creation. Creating Helm chart files."
             cat << 'EOF' > helm-chart/Chart.yaml
-          apiVersion: v2
-          name: kyverno-policies
-          version: 1.0.0
-          description: A Helm chart for a curated set of Kyverno policies.
-          type: application
-          EOF
-          fi
+apiVersion: v2
+name: kyverno-policies
+version: 1.0.0
+description: A Helm chart for a curated set of Kyverno policies.
+type: application
+EOF
 
-          if [ ! -f "helm-chart/values.yaml" ]; then
             cat << 'EOF' > helm-chart/values.yaml
-          # Default validationFailureAction for all policies
-          validationFailureAction: Audit
+# Default validationFailureAction for all policies
+validationFailureAction: Audit
 
-          # Default image registry configuration for the restrict_image_registries policy
-          imageRegistries:
-            global:
-              - "eu.foo.io/*"
-              - "bar.io/*"
-            containers: []
-            initContainers: []
-            ephemeralContainers: []
+# Default image registry configuration for the restrict_image_registries policy
+imageRegistries:
+  global:
+    - "eu.foo.io/*"
+    - "bar.io/*"
+  containers: []
+  initContainers: []
+  ephemeralContainers: []
 
-          # Legacy setting for backward compatibility (Deprecated)
-          allowedRegistries: "eu.foo.io/* | bar.io/*"
-          EOF
-          fi
+# Legacy setting for backward compatibility (Deprecated)
+allowedRegistries: "eu.foo.io/* | bar.io/*"
+EOF
 
-          if [ ! -f "helm-chart/templates/_helpers.tpl" ]; then
             cat << 'EOF' > helm-chart/templates/_helpers.tpl
-          {{- define "kyverno-policies.restrictImageRegistries" -}}
-          {{- $list := list -}}
-          {{- if .Values.imageRegistries.containers -}}
-          {{- range .Values.imageRegistries.containers -}}
-          {{- $list = append $list (printf "%s" .) -}}
-          {{- end -}}
-          {{- else -}}
-          {{- range .Values.imageRegistries.global -}}
-          {{- $list = append $list (printf "%s" .) -}}
-          {{- end -}}
-          {{- end -}}
-          {{- join " | " $list -}}
-          {{- end -}}
-          EOF
+{{- define "kyverno-policies.restrictImageRegistries" -}}
+{{- $list := list -}}
+{{- if .Values.imageRegistries.containers -}}
+{{- range .Values.imageRegistries.containers -}}
+{{- $list = append $list (printf "%s" .) -}}
+{{- end -}}
+{{- else -}}
+{{- range .Values.imageRegistries.global -}}
+{{- $list = append $list (printf "%s" .) -}}
+{{- end -}}
+{{- end -}}
+{{- join " | " $list -}}
+{{- end -}}
+EOF
           fi
-
-      - name: Bump Chart Version
-        if: steps.check_updates.outputs.changed == 'true'
-        run: |
-          # Use yq to safely read, modify, and write the YAML file
-          OLD_VERSION=$(yq '.version' helm-chart/Chart.yaml)
-          # Use a simple counter logic to bump the version
-          IFS='.' read -r major minor patch <<< "$OLD_VERSION"
-          new_patch=$((patch + 1))
-          NEW_VERSION="$major.$minor.$new_patch"
-          
-          yq -i ".version = \"$NEW_VERSION\"" helm-chart/Chart.yaml
-          echo "Bumping Helm chart version from $OLD_VERSION to $NEW_VERSION."
 
       - name: Commit and Push Changes
-        if: steps.check_updates.outputs.changed == 'true'
+        if: steps.check_updates.outputs.changed == 'true' || ! -f "helm-chart/Chart.yaml"
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
